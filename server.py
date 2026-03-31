@@ -14,6 +14,7 @@ import shutil
 import importlib
 import importlib.util
 import site
+import re
 import tempfile
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -26,6 +27,17 @@ DB_PASSWORD = "odoo_pass_2026"
 DB_NAME     = "odoo"
 PG_DATA_DIR = os.path.join(os.path.expanduser("~"), "pgdata")
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Packages that need C compilation / system libs, mapped to pip-installable
+# pure-Python (or pre-built-wheel) alternatives that Odoo 17 accepts.
+PATCH_DEPS = {
+    # source pkg pattern  →  replacement line written to patched requirements
+    r"^python-ldap\b":  "ldap3",
+    r"^psycopg2\b(?!-binary)": "psycopg2-binary",
+    # gevent has wheels on PyPI for common platforms; keep as-is but don't fail
+    # libsass / pySasl have no pure alternatives — skip them (Odoo runs without)
+    r"^libsass\b":      None,   # None → drop the line
+}
 
 def run(cmd, check=True):
     display = " ".join(str(c) for c in cmd)
@@ -55,6 +67,33 @@ def import_or_install(module_name, pip_name=None):
         pip_install(pip_name)
     importlib.invalidate_caches()
     return importlib.import_module(module_name)
+
+def patch_requirements(src_path, dst_path):
+    """
+    Read src_path and write dst_path with problematic C-extension packages
+    replaced by their pure-Python / pre-built-wheel equivalents.
+    """
+    written_replacements = set()
+    with open(src_path) as f_in, open(dst_path, "w") as f_out:
+        for raw_line in f_in:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                f_out.write(raw_line)
+                continue
+            replaced = False
+            for pattern, replacement in PATCH_DEPS.items():
+                if re.match(pattern, line, re.IGNORECASE):
+                    if replacement is None:
+                        f_out.write(f"# dropped (no pure wheel): {line}\n")
+                    elif replacement not in written_replacements:
+                        f_out.write(f"{replacement}\n")
+                        written_replacements.add(replacement)
+                    else:
+                        f_out.write(f"# already added: {replacement}\n")
+                    replaced = True
+                    break
+            if not replaced:
+                f_out.write(raw_line)
 
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
@@ -111,23 +150,11 @@ if not os.path.exists(ODOO_DIR):
 else:
     print(f"  Odoo already at {ODOO_DIR} — skipping clone.")
 
-req_file = os.path.join(ODOO_DIR, "requirements.txt")
-pip_install("wheel")
-
-# Build a patched requirements file that replaces 'psycopg2' with
-# 'psycopg2-binary' so pip never tries to compile from source.
+req_file    = os.path.join(ODOO_DIR, "requirements.txt")
 patched_req = os.path.join(tempfile.gettempdir(), "odoo_requirements_patched.txt")
-with open(req_file) as f_in, open(patched_req, "w") as f_out:
-    for line in f_in:
-        stripped = line.strip()
-        # Replace bare psycopg2 (with or without version pin) but leave
-        # psycopg2-binary alone if it already appears.
-        if stripped.lower().startswith("psycopg2") and "binary" not in stripped.lower():
-            # Rewrite to the binary variant, preserving any version specifier
-            tail = stripped[len("psycopg2"):]   # e.g. ">=2.8.0" or ""
-            f_out.write(f"psycopg2-binary{tail}\n")
-        else:
-            f_out.write(line)
+
+pip_install("wheel")
+patch_requirements(req_file, patched_req)
 
 run([sys.executable, "-m", "pip", "install", "--quiet",
      "--no-warn-script-location",
