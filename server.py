@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Odoo Auto-Installer & Host Script
-- Requires ONLY git + python3 in PATH (no psql, no apt, no sudo).
-- Uses psycopg2 (installed via pip) to talk to Postgres — no psql binary needed.
+- Requires ONLY git + python3 in PATH.
+- Uses 'postgresql-binary' (pip) to run a fully embedded Postgres — no system PG needed.
 - Clones Odoo 17, installs pip deps, writes config, runs on port 8000.
 """
 
@@ -14,6 +14,7 @@ import shutil
 import importlib
 import importlib.util
 import site
+import tempfile
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ODOO_BRANCH = "17.0"
@@ -21,10 +22,11 @@ ODOO_DIR    = os.path.join(os.path.expanduser("~"), "odoo")
 ODOO_PORT   = 8000
 ODOO_CONF   = os.path.join(os.path.expanduser("~"), "odoo.conf")
 DB_HOST     = "127.0.0.1"
-DB_PORT     = 5432
+DB_PORT     = 5433          # Use 5433 to avoid clashing with any system PG
 DB_USER     = "odoo"
 DB_PASSWORD = "odoo_pass_2026"
 DB_NAME     = "odoo"
+PG_DATA_DIR = os.path.join(os.path.expanduser("~"), "pgdata")
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run(cmd, check=True):
@@ -38,23 +40,19 @@ def step(msg):
     print('═'*60)
 
 def pip_install(*packages):
-    """Install packages and make them importable in the current process."""
+    """Install packages and immediately make them importable in this process."""
     run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", *packages])
-    # Reload site paths so newly installed packages are discoverable
     importlib.invalidate_caches()
     for path in site.getsitepackages():
         if path not in sys.path:
             sys.path.insert(0, path)
-    # Also check user site
     user_site = site.getusersitepackages()
     if user_site not in sys.path:
         sys.path.insert(0, user_site)
 
 def import_or_install(module_name, pip_name=None):
-    """Import a module, installing it first if missing."""
     pip_name = pip_name or module_name
     if importlib.util.find_spec(module_name) is None:
-        print(f"  Installing {pip_name}…")
         pip_install(pip_name)
     importlib.invalidate_caches()
     return importlib.import_module(module_name)
@@ -68,75 +66,75 @@ for tool in ("git", "python3"):
         sys.exit(1)
     print(f"  ✓  {tool} → {path}")
 
-# ── 2. Bootstrap pip & install psycopg2-binary ────────────────────────────────
-step("2 / 5 · Bootstrapping pip and installing psycopg2-binary")
+# ── 2. Install pip packages ───────────────────────────────────────────────────
+step("2 / 5 · Installing psycopg2-binary and postgresql-binary")
 pip_install("pip")
 pip_install("psycopg2-binary")
+pip_install("postgresql-binary")   # self-contained Postgres server
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
-print("  ✓  psycopg2 imported successfully")
+print("  ✓  psycopg2 imported")
 
-# ── 3. Start PostgreSQL & create role/db ──────────────────────────────────────
-step("3 / 5 · Configuring PostgreSQL")
+# ── 3. Start embedded PostgreSQL ─────────────────────────────────────────────
+step("3 / 5 · Starting embedded PostgreSQL")
 
-pg_start_candidates = [
-    ["pg_ctlcluster", "15", "main", "start"],
-    ["pg_ctlcluster", "16", "main", "start"],
-    ["pg_ctlcluster", "14", "main", "start"],
-    ["pg_ctlcluster", "13", "main", "start"],
-    ["service", "postgresql", "start"],
-    ["pg_ctl", "-D", "/var/lib/postgresql/data", "start"],
-    ["pg_ctl", "-D", "/usr/local/pgsql/data", "start"],
-]
-for cmd in pg_start_candidates:
-    if shutil.which(cmd[0]):
-        result = subprocess.run(cmd, capture_output=True)
-        if result.returncode == 0:
-            print(f"  ✓  Started postgres via: {' '.join(cmd)}")
-            break
+# postgresql-binary exposes a Python API to start/stop a PG cluster
+pg_module = import_or_install("postgresql", "postgresql-binary")
 
-print("  Waiting for postgres to accept connections…")
-pg_superusers = ["postgres", os.environ.get("USER", ""), os.environ.get("PGUSER", "")]
-pg_connected_user = None
+# Initialise data directory if needed
+if not os.path.exists(PG_DATA_DIR):
+    os.makedirs(PG_DATA_DIR, exist_ok=True)
+
+# Use the pg_ctl / initdb binaries bundled inside postgresql-binary
+pg_bin = os.path.join(os.path.dirname(pg_module.__file__), "bin")
+initdb  = os.path.join(pg_bin, "initdb")
+pg_ctl  = os.path.join(pg_bin, "pg_ctl")
+
+if not os.path.exists(os.path.join(PG_DATA_DIR, "PG_VERSION")):
+    print("  Initialising Postgres data directory…")
+    subprocess.run([initdb, "-D", PG_DATA_DIR, "-U", "postgres",
+                    "--auth", "trust", "--no-instructions"],
+                   check=True)
+
+# Write a minimal postgresql.conf that listens on our chosen port
+pg_conf_path = os.path.join(PG_DATA_DIR, "postgresql.conf")
+with open(pg_conf_path, "a") as f:
+    f.write(f"\nlisten_addresses = '127.0.0.1'\nport = {{DB_PORT}}\n")
+
+# Start the server
+log_path = os.path.join(PG_DATA_DIR, "pg.log")
+subprocess.run([pg_ctl, "-D", PG_DATA_DIR, "-l", log_path, "start"], check=True)
+print("  Waiting for embedded Postgres…")
 
 for attempt in range(30):
-    for user in pg_superusers:
-        if not user:
-            continue
-        try:
-            conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
-                                    dbname="postgres", user=user,
-                                    connect_timeout=2)
-            conn.close()
-            pg_connected_user = user
-            print(f"  ✓  Postgres is up — connected as '{user}' (attempt {attempt+1})")
-            break
-        except Exception:
-            pass
-    if pg_connected_user:
+    try:
+        conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
+                                dbname="postgres", user="postgres",
+                                connect_timeout=2)
+        conn.close()
+        print(f"  ✓  Postgres ready (attempt {{attempt+1}})")
         break
-    time.sleep(1)
+    except Exception:
+        time.sleep(1)
 else:
-    print("  ✗  Could not connect to Postgres after 30s. Make sure it's running on 127.0.0.1:5432")
+    print("  ✗  Embedded Postgres did not start in time.")
+    print("     Check log:", log_path)
     sys.exit(1)
 
 def pg_exec(sql):
-    """Execute SQL as the discovered superuser; ignore non-fatal errors."""
     try:
         conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
-                                dbname="postgres", user=pg_connected_user,
+                                dbname="postgres", user="postgres",
                                 connect_timeout=5)
         conn.autocommit = True
-        cur = conn.cursor()
-        cur.execute(sql)
-        cur.close()
+        conn.cursor().execute(sql)
         conn.close()
-        print(f"  SQL ok: {sql[:80]}")
+        print(f"  SQL ok: {{sql[:80]}}")
     except Exception as e:
-        print(f"  SQL notice (non-fatal): {e}")
+        print(f"  SQL notice (non-fatal): {{e}}")
 
-pg_exec(f"CREATE ROLE {DB_USER} LOGIN CREATEDB PASSWORD '{DB_PASSWORD}';")
-pg_exec(f"CREATE DATABASE {DB_NAME} OWNER {DB_USER};")
+pg_exec(f"CREATE ROLE {{DB_USER}} LOGIN CREATEDB PASSWORD '{{DB_PASSWORD}}';")
+pg_exec(f"CREATE DATABASE {{DB_NAME}} OWNER {{DB_USER}};")
 
 # ── 4. Clone Odoo & install Python deps ──────────────────────────────────────
 step("4 / 5 · Cloning Odoo & installing Python requirements")
@@ -148,7 +146,7 @@ if not os.path.exists(ODOO_DIR):
         ODOO_DIR,
     ])
 else:
-    print(f"  Odoo already at {ODOO_DIR} — skipping clone.")
+    print(f"  Odoo already at {{ODOO_DIR}} — skipping clone.")
 
 req_file = os.path.join(ODOO_DIR, "requirements.txt")
 pip_install("wheel")
@@ -163,19 +161,19 @@ step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
 conf_content = (
     "[options]\n"
     f"admin_passwd = admin\n"
-    f"db_host      = {DB_HOST}\n"
-    f"db_port      = {DB_PORT}\n"
-    f"db_user      = {DB_USER}\n"
-    f"db_password  = {DB_PASSWORD}\n"
-    f"db_name      = {DB_NAME}\n"
-    f"addons_path  = {ODOO_DIR}/addons\n"
+    f"db_host      = {{DB_HOST}}\n"
+    f"db_port      = {{DB_PORT}}\n"
+    f"db_user      = {{DB_USER}}\n"
+    f"db_password  = {{DB_PASSWORD}}\n"
+    f"db_name      = {{DB_NAME}}\n"
+    f"addons_path  = {{ODOO_DIR}}/addons\n"
     "logfile      = False\n"
-    f"xmlrpc_port  = {ODOO_PORT}\n"
+    f"xmlrpc_port  = {{ODOO_PORT}}\n"
 )
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
-print(f"  Config written → {ODOO_CONF}")
-print(f"\n  🌐  Odoo starting at http://0.0.0.0:{ODOO_PORT}\n")
+print(f"  Config written → {{ODOO_CONF}}")
+print(f"\n  🌐  Odoo starting at http://0.0.0.0:{{ODOO_PORT}}\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
 os.chdir(ODOO_DIR)
