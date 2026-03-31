@@ -14,14 +14,13 @@ import shutil
 import importlib
 import importlib.util
 import site
+import tempfile
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ODOO_BRANCH = "17.0"
 ODOO_DIR    = os.path.join(os.path.expanduser("~"), "odoo")
 ODOO_PORT   = 8000
 ODOO_CONF   = os.path.join(os.path.expanduser("~"), "odoo.conf")
-DB_HOST     = "127.0.0.1"
-DB_PORT     = 5433
 DB_USER     = "odoo"
 DB_PASSWORD = "odoo_pass_2026"
 DB_NAME     = "odoo"
@@ -82,7 +81,6 @@ os.makedirs(PG_DATA_DIR, exist_ok=True)
 pg = pgserver.get_server(PG_DATA_DIR, cleanup_mode="stop")
 print(f"  ✓  Postgres running — URI: {pg.get_uri()}")
 
-# Connect as the pgserver superuser and create odoo role + database
 def pg_exec(sql):
     try:
         conn = psycopg2.connect(pg.get_uri("postgres"))
@@ -96,10 +94,12 @@ def pg_exec(sql):
 pg_exec(f"CREATE ROLE {DB_USER} LOGIN CREATEDB PASSWORD '{DB_PASSWORD}';")
 pg_exec(f"CREATE DATABASE {DB_NAME} OWNER {DB_USER};")
 
-# Grab host/port from the running server for odoo.conf
-pg_uri  = pg.get_uri()  # e.g. postgresql://localhost:5433/
+# Grab host/port from the running server URI for odoo.conf
+from urllib.parse import urlparse
+_parsed = urlparse(pg.get_uri(DB_NAME))
+# pgserver uses a Unix socket by default; use 127.0.0.1 TCP for Odoo compatibility
 pg_host = "127.0.0.1"
-pg_port = pg.pg_port if hasattr(pg, "pg_port") else DB_PORT
+pg_port = pg.pg_port if hasattr(pg, "pg_port") else 5432
 
 # ── 4. Clone Odoo & install Python deps ──────────────────────────────────────
 step("4 / 5 · Cloning Odoo & installing Python requirements")
@@ -115,8 +115,19 @@ else:
 
 req_file = os.path.join(ODOO_DIR, "requirements.txt")
 pip_install("wheel")
+
+# Write a constraints file that redirects psycopg2 → psycopg2-binary so the
+# source build (which needs pg_config / libpq headers) is never attempted.
+constraints_file = os.path.join(tempfile.gettempdir(), "odoo_constraints.txt")
+with open(constraints_file, "w") as f:
+    f.write("psycopg2-binary\n")
+
 run([sys.executable, "-m", "pip", "install", "--quiet",
-     "--no-warn-script-location", "-r", req_file])
+     "--no-warn-script-location",
+     "--constraint", constraints_file,
+     "-r", req_file])
+
+# Force-reinstall the binary wheel to make sure it wins over any stub left
 run([sys.executable, "-m", "pip", "install", "--quiet",
      "--force-reinstall", "psycopg2-binary"], check=False)
 
