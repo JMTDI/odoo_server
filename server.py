@@ -11,6 +11,9 @@ import subprocess
 import sys
 import time
 import shutil
+import importlib
+import importlib.util
+import site
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ODOO_BRANCH = "17.0"
@@ -34,6 +37,28 @@ def step(msg):
     print(f"  {msg}")
     print('═'*60)
 
+def pip_install(*packages):
+    """Install packages and make them importable in the current process."""
+    run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", *packages])
+    # Reload site paths so newly installed packages are discoverable
+    importlib.invalidate_caches()
+    for path in site.getsitepackages():
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    # Also check user site
+    user_site = site.getusersitepackages()
+    if user_site not in sys.path:
+        sys.path.insert(0, user_site)
+
+def import_or_install(module_name, pip_name=None):
+    """Import a module, installing it first if missing."""
+    pip_name = pip_name or module_name
+    if importlib.util.find_spec(module_name) is None:
+        print(f"  Installing {pip_name}…")
+        pip_install(pip_name)
+    importlib.invalidate_caches()
+    return importlib.import_module(module_name)
+
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
 for tool in ("git", "python3"):
@@ -43,19 +68,17 @@ for tool in ("git", "python3"):
         sys.exit(1)
     print(f"  ✓  {tool} → {path}")
 
-# ── 2. Install psycopg2-binary early so we can drive Postgres from Python ─────
-step("2 / 5 · Installing psycopg2-binary (needed before PostgreSQL setup)")
-run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
-run([sys.executable, "-m", "pip", "install", "--quiet", "psycopg2-binary"])
+# ── 2. Bootstrap pip & install psycopg2-binary ────────────────────────────────
+step("2 / 5 · Bootstrapping pip and installing psycopg2-binary")
+pip_install("pip")
+pip_install("psycopg2-binary")
 
-# Now import it
-import importlib
-psycopg2 = importlib.import_module("psycopg2")
+psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
+print("  ✓  psycopg2 imported successfully")
 
 # ── 3. Start PostgreSQL & create role/db ──────────────────────────────────────
 step("3 / 5 · Configuring PostgreSQL")
 
-# Try common ways to start the Postgres server — soft-fail all of them
 pg_start_candidates = [
     ["pg_ctlcluster", "15", "main", "start"],
     ["pg_ctlcluster", "16", "main", "start"],
@@ -73,36 +96,36 @@ for cmd in pg_start_candidates:
             break
 
 print("  Waiting for postgres to accept connections…")
-for attempt in range(30):
-    try:
-        conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
-                                dbname="postgres", user="postgres",
-                                connect_timeout=2)
-        conn.close()
-        print(f"  ✓  Postgres is up (attempt {attempt+1})")
-        break
-    except Exception:
-        time.sleep(1)
-else:
-    # Try connecting as current OS user (some containers run postgres as app user)
-    try:
-        conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
-                                dbname="postgres",
-                                connect_timeout=2)
-        conn.close()
-        print("  ✓  Postgres is up (connected as current user)")
-    except Exception as e:
-        print(f"  ✗  Could not connect to Postgres: {e}")
-        print("     Make sure PostgreSQL is running and accessible on 127.0.0.1:5432")
-        sys.exit(1)
+pg_superusers = ["postgres", os.environ.get("USER", ""), os.environ.get("PGUSER", "")]
+pg_connected_user = None
 
-def pg_exec(sql, superuser=True):
-    """Execute a SQL statement on the postgres maintenance DB, ignore errors."""
+for attempt in range(30):
+    for user in pg_superusers:
+        if not user:
+            continue
+        try:
+            conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
+                                    dbname="postgres", user=user,
+                                    connect_timeout=2)
+            conn.close()
+            pg_connected_user = user
+            print(f"  ✓  Postgres is up — connected as '{user}' (attempt {attempt+1})")
+            break
+        except Exception:
+            pass
+    if pg_connected_user:
+        break
+    time.sleep(1)
+else:
+    print("  ✗  Could not connect to Postgres after 30s. Make sure it's running on 127.0.0.1:5432")
+    sys.exit(1)
+
+def pg_exec(sql):
+    """Execute SQL as the discovered superuser; ignore non-fatal errors."""
     try:
-        kw = dict(host=DB_HOST, port=DB_PORT, dbname="postgres", connect_timeout=5)
-        if superuser:
-            kw["user"] = "postgres"
-        conn = psycopg2.connect(**kw)
+        conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
+                                dbname="postgres", user=pg_connected_user,
+                                connect_timeout=5)
         conn.autocommit = True
         cur = conn.cursor()
         cur.execute(sql)
@@ -128,10 +151,9 @@ else:
     print(f"  Odoo already at {ODOO_DIR} — skipping clone.")
 
 req_file = os.path.join(ODOO_DIR, "requirements.txt")
-run([sys.executable, "-m", "pip", "install", "--quiet", "wheel"])
+pip_install("wheel")
 run([sys.executable, "-m", "pip", "install", "--quiet",
      "--no-warn-script-location", "-r", req_file])
-# Reinstall binary build of psycopg2 to ensure it overrides any compiled version
 run([sys.executable, "-m", "pip", "install", "--quiet",
      "--force-reinstall", "psycopg2-binary"], check=False)
 
