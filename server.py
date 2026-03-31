@@ -37,9 +37,10 @@ def step(msg):
     print(f"  {msg}")
     print('═'*60)
 
-def pip_install(*packages):
+def pip_install(*packages, extra_args=None):
     """Install packages and immediately make them importable in this process."""
-    run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", *packages])
+    extra = extra_args or []
+    run([sys.executable, "-m", "pip", "install", "--quiet", *extra, *packages])
     importlib.invalidate_caches()
     for path in site.getsitepackages():
         if path not in sys.path:
@@ -66,7 +67,7 @@ for tool in ("git", "python3"):
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing psycopg2-binary and pgserver")
-pip_install("pip")
+pip_install("pip", extra_args=["--upgrade"])
 pip_install("psycopg2-binary")
 pip_install("pgserver")   # self-contained Postgres server (no system PG needed)
 
@@ -94,12 +95,9 @@ def pg_exec(sql):
 pg_exec(f"CREATE ROLE {DB_USER} LOGIN CREATEDB PASSWORD '{DB_PASSWORD}';")
 pg_exec(f"CREATE DATABASE {DB_NAME} OWNER {DB_USER};")
 
-# Grab host/port from the running server URI for odoo.conf
-from urllib.parse import urlparse
-_parsed = urlparse(pg.get_uri(DB_NAME))
-# pgserver uses a Unix socket by default; use 127.0.0.1 TCP for Odoo compatibility
+# Grab port from the running pgserver instance for odoo.conf
 pg_host = "127.0.0.1"
-pg_port = pg.pg_port if hasattr(pg, "pg_port") else 5432
+pg_port = getattr(pg, "pg_port", 5432)
 
 # ── 4. Clone Odoo & install Python deps ──────────────────────────────────────
 step("4 / 5 · Cloning Odoo & installing Python requirements")
@@ -116,20 +114,24 @@ else:
 req_file = os.path.join(ODOO_DIR, "requirements.txt")
 pip_install("wheel")
 
-# Write a constraints file that redirects psycopg2 → psycopg2-binary so the
-# source build (which needs pg_config / libpq headers) is never attempted.
-constraints_file = os.path.join(tempfile.gettempdir(), "odoo_constraints.txt")
-with open(constraints_file, "w") as f:
-    f.write("psycopg2-binary\n")
+# Build a patched requirements file that replaces 'psycopg2' with
+# 'psycopg2-binary' so pip never tries to compile from source.
+patched_req = os.path.join(tempfile.gettempdir(), "odoo_requirements_patched.txt")
+with open(req_file) as f_in, open(patched_req, "w") as f_out:
+    for line in f_in:
+        stripped = line.strip()
+        # Replace bare psycopg2 (with or without version pin) but leave
+        # psycopg2-binary alone if it already appears.
+        if stripped.lower().startswith("psycopg2") and "binary" not in stripped.lower():
+            # Rewrite to the binary variant, preserving any version specifier
+            tail = stripped[len("psycopg2"):]   # e.g. ">=2.8.0" or ""
+            f_out.write(f"psycopg2-binary{tail}\n")
+        else:
+            f_out.write(line)
 
 run([sys.executable, "-m", "pip", "install", "--quiet",
      "--no-warn-script-location",
-     "--constraint", constraints_file,
-     "-r", req_file])
-
-# Force-reinstall the binary wheel to make sure it wins over any stub left
-run([sys.executable, "-m", "pip", "install", "--quiet",
-     "--force-reinstall", "psycopg2-binary"], check=False)
+     "-r", patched_req])
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
 step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
