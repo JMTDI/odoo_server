@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Odoo Auto-Installer & Host Script
-- NO apt/sudo required — assumes git, python3, postgresql are pre-installed.
-- Installs Python deps via pip, configures PostgreSQL, clones Odoo, runs on port 8000.
+- Requires ONLY git + python3 in PATH (no psql, no apt, no sudo).
+- Uses psycopg2 (installed via pip) to talk to Postgres — no psql binary needed.
+- Clones Odoo 17, installs pip deps, writes config, runs on port 8000.
 """
 
 import os
@@ -12,99 +13,150 @@ import time
 import shutil
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ODOO_BRANCH  = "17.0"
-ODOO_DIR     = os.path.join(os.path.expanduser("~"), "odoo")
-ODOO_PORT    = 8000
-ODOO_CONF    = os.path.join(os.path.expanduser("~"), "odoo.conf")
-DB_USER      = "odoo"
-DB_PASSWORD  = "odoo_pass_2026"
-DB_NAME      = "odoo"
+ODOO_BRANCH = "17.0"
+ODOO_DIR    = os.path.join(os.path.expanduser("~"), "odoo")
+ODOO_PORT   = 8000
+ODOO_CONF   = os.path.join(os.path.expanduser("~"), "odoo.conf")
+DB_HOST     = "127.0.0.1"
+DB_PORT     = 5432
+DB_USER     = "odoo"
+DB_PASSWORD = "odoo_pass_2026"
+DB_NAME     = "odoo"
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run(cmd, check=True, shell=False, input=None):
-    display = cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
+def run(cmd, check=True):
+    display = " ".join(str(c) for c in cmd)
     print(f"\n▶  {display}")
-    return subprocess.run(cmd, check=check, shell=shell, input=input,
-                          capture_output=False)
+    subprocess.run(cmd, check=check)
 
 def step(msg):
     print(f"\n{'═'*60}")
     print(f"  {msg}")
     print('═'*60)
 
-def pg_run(sql, db="postgres"):
-    """Run a SQL command via psql as the current user (no sudo needed in most containers)."""
-    run(["psql", "-U", "postgres", "-d", db, "-c", sql], check=False)
-
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
-for tool in ("git", "python3", "psql"):
+for tool in ("git", "python3"):
     path = shutil.which(tool)
     if not path:
         print(f"  ✗  '{tool}' not found in PATH — cannot continue.")
         sys.exit(1)
     print(f"  ✓  {tool} → {path}")
 
-# ── 2. PostgreSQL setup ───────────────────────────────────────────────────────
-step("2 / 5 · Configuring PostgreSQL")
+# ── 2. Install psycopg2-binary early so we can drive Postgres from Python ─────
+step("2 / 5 · Installing psycopg2-binary (needed before PostgreSQL setup)")
+run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
+run([sys.executable, "-m", "pip", "install", "--quiet", "psycopg2-binary"])
 
-# Try to start postgres if a socket/pid isn't already up
+# Now import it
+import importlib
+psycopg2 = importlib.import_module("psycopg2")
+
+# ── 3. Start PostgreSQL & create role/db ──────────────────────────────────────
+step("3 / 5 · Configuring PostgreSQL")
+
+# Try common ways to start the Postgres server — soft-fail all of them
 pg_start_candidates = [
     ["pg_ctlcluster", "15", "main", "start"],
-    ["pg_ctlcluster", "14", "main", "start"],
     ["pg_ctlcluster", "16", "main", "start"],
+    ["pg_ctlcluster", "14", "main", "start"],
+    ["pg_ctlcluster", "13", "main", "start"],
     ["service", "postgresql", "start"],
     ["pg_ctl", "-D", "/var/lib/postgresql/data", "start"],
+    ["pg_ctl", "-D", "/usr/local/pgsql/data", "start"],
 ]
 for cmd in pg_start_candidates:
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode == 0:
-        print(f"  ✓  Started postgres via: {' '.join(cmd)}")
+    if shutil.which(cmd[0]):
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode == 0:
+            print(f"  ✓  Started postgres via: {' '.join(cmd)}")
+            break
+
+print("  Waiting for postgres to accept connections…")
+for attempt in range(30):
+    try:
+        conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
+                                dbname="postgres", user="postgres",
+                                connect_timeout=2)
+        conn.close()
+        print(f"  ✓  Postgres is up (attempt {attempt+1})")
         break
-time.sleep(3)
+    except Exception:
+        time.sleep(1)
+else:
+    # Try connecting as current OS user (some containers run postgres as app user)
+    try:
+        conn = psycopg2.connect(host=DB_HOST, port=DB_PORT,
+                                dbname="postgres",
+                                connect_timeout=2)
+        conn.close()
+        print("  ✓  Postgres is up (connected as current user)")
+    except Exception as e:
+        print(f"  ✗  Could not connect to Postgres: {e}")
+        print("     Make sure PostgreSQL is running and accessible on 127.0.0.1:5432")
+        sys.exit(1)
 
-# Create role + database (errors are non-fatal — they already exist on re-runs)
-pg_run(f"CREATE ROLE {DB_USER} LOGIN CREATEDB PASSWORD '{DB_PASSWORD}';")
-pg_run(f"CREATE DATABASE {DB_NAME} OWNER {DB_USER};")
+def pg_exec(sql, superuser=True):
+    """Execute a SQL statement on the postgres maintenance DB, ignore errors."""
+    try:
+        kw = dict(host=DB_HOST, port=DB_PORT, dbname="postgres", connect_timeout=5)
+        if superuser:
+            kw["user"] = "postgres"
+        conn = psycopg2.connect(**kw)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(sql)
+        cur.close()
+        conn.close()
+        print(f"  SQL ok: {sql[:80]}")
+    except Exception as e:
+        print(f"  SQL notice (non-fatal): {e}")
 
-# ── 3. Clone Odoo ─────────────────────────────────────────────────────────────
-step("3 / 5 · Cloning Odoo")
+pg_exec(f"CREATE ROLE {DB_USER} LOGIN CREATEDB PASSWORD '{DB_PASSWORD}';")
+pg_exec(f"CREATE DATABASE {DB_NAME} OWNER {DB_USER};")
+
+# ── 4. Clone Odoo & install Python deps ──────────────────────────────────────
+step("4 / 5 · Cloning Odoo & installing Python requirements")
 if not os.path.exists(ODOO_DIR):
     run([
-        "git", "clone",
-        "--depth", "1",
+        "git", "clone", "--depth", "1",
         "--branch", ODOO_BRANCH,
         "https://github.com/odoo/odoo.git",
         ODOO_DIR,
     ])
 else:
-    print(f"  Odoo already cloned at {ODOO_DIR} — skipping.")
+    print(f"  Odoo already at {ODOO_DIR} — skipping clone.")
 
-# ── 4. Python dependencies ────────────────────────────────────────────────────
-step("4 / 5 · Installing Python requirements (pip only)")
 req_file = os.path.join(ODOO_DIR, "requirements.txt")
-
-run([sys.executable, "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
-run([sys.executable, "-m", "pip", "install", "wheel", "--quiet"])
-run([sys.executable, "-m", "pip", "install", "-r", req_file,
-     "--quiet", "--no-warn-script-location"])
-# psycopg2-binary doesn't need libpq headers — safe in locked containers
-run([sys.executable, "-m", "pip", "install", "psycopg2-binary", "--quiet"], check=False)
+run([sys.executable, "-m", "pip", "install", "--quiet", "wheel"])
+run([sys.executable, "-m", "pip", "install", "--quiet",
+     "--no-warn-script-location", "-r", req_file])
+# Reinstall binary build of psycopg2 to ensure it overrides any compiled version
+run([sys.executable, "-m", "pip", "install", "--quiet",
+     "--force-reinstall", "psycopg2-binary"], check=False)
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
-step("5 / 5 · Writing odoo.conf & starting Odoo on port " + str(ODOO_PORT))
+step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
 
-conf_content = f"""[options]\nadmin_passwd = admin\ndb_host      = 127.0.0.1\ndb_port      = 5432\ndb_user      = {DB_USER}\ndb_password  = {DB_PASSWORD}\ndb_name      = {DB_NAME}\naddons_path  = {ODOO_DIR}/addons\nlogfile      = False\nxmlrpc_port  = {ODOO_PORT}\n"""
+conf_content = (
+    "[options]\n"
+    f"admin_passwd = admin\n"
+    f"db_host      = {DB_HOST}\n"
+    f"db_port      = {DB_PORT}\n"
+    f"db_user      = {DB_USER}\n"
+    f"db_password  = {DB_PASSWORD}\n"
+    f"db_name      = {DB_NAME}\n"
+    f"addons_path  = {ODOO_DIR}/addons\n"
+    "logfile      = False\n"
+    f"xmlrpc_port  = {ODOO_PORT}\n"
+)
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
 print(f"  Config written → {ODOO_CONF}")
-
 print(f"\n  🌐  Odoo starting at http://0.0.0.0:{ODOO_PORT}\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
 os.chdir(ODOO_DIR)
-
-# exec() replaces this process — Ctrl-C / SIGTERM stops Odoo cleanly
 os.execv(sys.executable, [
     sys.executable, odoo_bin,
     "--config", ODOO_CONF,
