@@ -38,14 +38,13 @@ PATCH_DEPS = {
 
 def run(cmd, check=True):
     display = " ".join(str(c) for c in cmd)
-    print(f"
-▶  {display}")
+    print("\n▶  " + display)
     subprocess.run(cmd, check=check)
 
 def step(msg):
-    print(f"\n{'═'*60}")
-    print(f"  {msg}")
-    print('═'*60)
+    print("\n" + "═" * 60)
+    print("  " + msg)
+    print("═" * 60)
 
 def pip_install(*packages, extra_args=None):
     """Install packages and immediately make them importable in this process."""
@@ -82,12 +81,12 @@ def patch_requirements(src_path, dst_path):
             for pattern, replacement in PATCH_DEPS.items():
                 if re.match(pattern, line, re.IGNORECASE):
                     if replacement is None:
-                        f_out.write(f"# dropped (no pure wheel): {line}\n")
+                        f_out.write("# dropped (no pure wheel): " + line + "\n")
                     elif replacement not in written_replacements:
-                        f_out.write(f"{replacement}\n")
+                        f_out.write(replacement + "\n")
                         written_replacements.add(replacement)
                     else:
-                        f_out.write(f"# already added: {replacement}\n")
+                        f_out.write("# already added: " + replacement + "\n")
                     replaced = True
                     break
             if not replaced:
@@ -98,9 +97,9 @@ step("1 / 5 · Checking prerequisites")
 for tool in ("git", "python3"):
     path = shutil.which(tool)
     if not path:
-        print(f"  ✗  '{tool}' not found in PATH — cannot continue.")
+        print("  ✗  '" + tool + "' not found in PATH — cannot continue.")
         sys.exit(1)
-    print(f"  ✓  {tool} → {path}")
+    print("  ✓  " + tool + " → " + path)
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing psycopg2-binary and pgserver")
@@ -113,12 +112,12 @@ psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
 print("  ✓  psycopg2 + pgserver imported")
 
-# ── 3. Start embedded PostgreSQL via pgserver ────────────────────────────────
+# ── 3. Start embedded PostgreSQL via pgserver ─────────────────────────────────
 step("3 / 5 · Starting embedded PostgreSQL (pgserver)")
 
 os.makedirs(PG_DATA_DIR, exist_ok=True)
 pg = pgserver.get_server(PG_DATA_DIR, cleanup_mode="stop")
-print(f"  ✓  Postgres running — URI: {pg.get_uri()}")
+print("  ✓  Postgres running — URI: " + pg.get_uri())
 
 def pg_exec(sql):
     try:
@@ -126,12 +125,12 @@ def pg_exec(sql):
         conn.autocommit = True
         conn.cursor().execute(sql)
         conn.close()
-        print(f"  SQL ok: {sql[:80]}")
+        print("  SQL ok: " + sql[:80])
     except Exception as e:
-        print(f"  SQL notice (non-fatal): {e}")
+        print("  SQL notice (non-fatal): " + str(e))
 
-pg_exec(f"CREATE ROLE {DB_USER} LOGIN CREATEDB PASSWORD '{DB_PASSWORD}';")
-pg_exec(f"CREATE DATABASE {DB_NAME} OWNER {DB_USER};")
+pg_exec("CREATE ROLE " + DB_USER + " LOGIN CREATEDB PASSWORD '" + DB_PASSWORD + "';")
+pg_exec("CREATE DATABASE " + DB_NAME + " OWNER " + DB_USER + ";")
 
 # Grab port from the running pgserver instance for odoo.conf
 pg_host = "127.0.0.1"
@@ -147,7 +146,7 @@ if not os.path.exists(ODOO_DIR):
         ODOO_DIR,
     ])
 else:
-    print(f"  Odoo already at {ODOO_DIR} — skipping clone.")
+    print("  Odoo already at " + ODOO_DIR + " — skipping clone.")
 
 req_file    = os.path.join(ODOO_DIR, "requirements.txt")
 patched_req = os.path.join(tempfile.gettempdir(), "odoo_requirements_patched.txt")
@@ -167,20 +166,20 @@ step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
 
 conf_content = (
     "[options]\n"
-    f"admin_passwd = admin\n"
-    f"db_host      = {pg_host}\n"
-    f"db_port      = {pg_port}\n"
-    f"db_user      = {DB_USER}\n"
-    f"db_password  = {DB_PASSWORD}\n"
-    f"db_name      = {DB_NAME}\n"
-    f"addons_path  = {ODOO_DIR}/addons\n"
+    "admin_passwd = admin\n"
+    "db_host      = " + pg_host + "\n"
+    "db_port      = " + str(pg_port) + "\n"
+    "db_user      = " + DB_USER + "\n"
+    "db_password  = " + DB_PASSWORD + "\n"
+    "db_name      = " + DB_NAME + "\n"
+    "addons_path  = " + ODOO_DIR + "/addons\n"
     "logfile      = False\n"
-    f"xmlrpc_port  = {ODOO_PORT}\n"
+    "xmlrpc_port  = " + str(ODOO_PORT) + "\n"
 )
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
-print(f"  Config written → {ODOO_CONF}")
-print(f"\n  🌐  Odoo starting at http://0.0.0.0:{ODOO_PORT}\n")
+print("  Config written → " + ODOO_CONF)
+print("\n  🌐  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
 os.chdir(ODOO_DIR)
