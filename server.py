@@ -15,7 +15,7 @@ import importlib.util
 import site
 import re
 import tempfile
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ODOO_BRANCH = "17.0"
@@ -28,26 +28,25 @@ DB_NAME     = "odoo"
 PG_DATA_DIR = os.path.join(os.path.expanduser("~"), "pgdata")
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Packages that need C compilation / system libs, mapped to pip-installable
-# pure-Python (or pre-built-wheel) alternatives that Odoo 17 accepts.
 PATCH_DEPS = {
     r"^python-ldap\b":  "ldap3",
     r"^psycopg2\b(?!-binary)": "psycopg2-binary",
-    r"^libsass\b":      None,   # None -> drop the line
+    r"^libsass\b":      None,
 }
 
 def run(cmd, check=True):
     display = " ".join(str(c) for c in cmd)
-    print("\n▶  " + display)
+    print("
+▶  " + display)
     subprocess.run(cmd, check=check)
 
 def step(msg):
-    print("\n" + "═" * 60)
+    print("
+" + "═" * 60)
     print("  " + msg)
     print("═" * 60)
 
 def pip_install(*packages, extra_args=None):
-    """Install packages and immediately make them importable in this process."""
     extra = extra_args or []
     run([sys.executable, "-m", "pip", "install", "--quiet", *extra, *packages])
     importlib.invalidate_caches()
@@ -66,10 +65,6 @@ def import_or_install(module_name, pip_name=None):
     return importlib.import_module(module_name)
 
 def patch_requirements(src_path, dst_path):
-    """
-    Read src_path and write dst_path with problematic C-extension packages
-    replaced by their pure-Python / pre-built-wheel equivalents.
-    """
     written_replacements = set()
     with open(src_path) as f_in, open(dst_path, "w") as f_out:
         for raw_line in f_in:
@@ -93,16 +88,8 @@ def patch_requirements(src_path, dst_path):
                 f_out.write(raw_line)
 
 def patch_pkg_resources(odoo_dir):
-    """
-    Walk every .py file under odoo_dir and comment out:
-      - any 'import pkg_resources' or 'from pkg_resources import ...' line
-      - any line that references 'PkgResourcesDeprecationWarning'
-    """
-    import_re = re.compile(
-        r"^\s*(import pkg_resources|from pkg_resources\b)"
-    )
-    usage_re = re.compile(r"\bPkgResourcesDeprecationWarning\b")
-
+    import_re = re.compile(r"^\s*(import pkg_resources|from pkg_resources\b)")
+    usage_re  = re.compile(r"\bPkgResourcesDeprecationWarning\b")
     patched = []
     for root, dirs, files in os.walk(odoo_dir):
         dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
@@ -126,77 +113,61 @@ def patch_pkg_resources(odoo_dir):
             if changed:
                 with open(fpath, "w", encoding="utf-8") as fh:
                     fh.writelines(new_lines)
-                rel = os.path.relpath(fpath, odoo_dir)
-                patched.append(rel)
-                print("  patched: " + rel)
+                patched.append(os.path.relpath(fpath, odoo_dir))
     print("  ✓  pkg_resources patched in " + str(len(patched)) + " file(s)")
 
-def get_pg_host_port(pg):
+def parse_pgserver_connection(pg):
     """
-    Reliably extract host and port from the pgserver instance by parsing the
-    superuser URI (pg.get_uri("postgres")).  The plain get_uri() may omit the
-    port when it equals 5432 and the server is actually on a different port;
-    the "postgres" URI always includes the real port.
-    Falls back to attribute inspection then hard defaults.
+    pgserver on Linux uses a Unix-domain socket (no TCP port).
+    get_uri("postgres") returns either:
+      TCP:    postgresql://postgres:@127.0.0.1:PORT/postgres
+      Socket: postgresql://postgres:@/postgres?host=/path/to/socket/dir
+
+    Returns (db_host, db_port):
+      TCP    -> ("127.0.0.1", PORT_int)
+      Socket -> ("/path/to/socket/dir", None)
     """
-    # 1. Try parsing the superuser URI — most reliable
-    try:
-        raw_uri = pg.get_uri("postgres")
-        print("  pgserver superuser URI: " + raw_uri)
-        parsed = urlparse(raw_uri)
-        if parsed.hostname and parsed.port:
-            return str(parsed.hostname), int(parsed.port)
-    except Exception as e:
-        print("  URI parse warning: " + str(e))
+    raw_uri = pg.get_uri("postgres")
+    print("  pgserver URI: " + raw_uri)
+    parsed = urlparse(raw_uri)
 
-    # 2. Fall back to object attributes
-    host = getattr(pg, "pg_host", None) or getattr(pg, "host", None) or "127.0.0.1"
-    port = getattr(pg, "pg_port", None) or getattr(pg, "port", None)
-    if port:
-        print("  pgserver attrs  host=" + str(host) + "  port=" + str(port))
-        return str(host), int(port)
+    if parsed.hostname and parsed.port:
+        print("  mode: TCP  host=" + parsed.hostname + "  port=" + str(parsed.port))
+        return parsed.hostname, parsed.port
 
-    # 3. Last resort: parse the no-arg URI
-    try:
-        raw_uri = pg.get_uri()
-        parsed = urlparse(raw_uri)
-        if parsed.hostname and parsed.port:
-            return str(parsed.hostname), int(parsed.port)
-    except Exception:
-        pass
+    qs = parse_qs(parsed.query)
+    if "host" in qs:
+        socket_dir = qs["host"][0]
+        print("  mode: Unix socket  dir=" + socket_dir)
+        return socket_dir, None
 
-    print("  WARNING: could not detect pgserver port, defaulting to 5432")
-    return "127.0.0.1", 5432
+    raise RuntimeError("Cannot determine pgserver connection from URI: " + raw_uri)
 
-# ── 1. Check prerequisites ────────────────────────────────────────────────────
+# ── 1. Prerequisites ──────────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
 for tool in ("git", "python3"):
-    path = shutil.which(tool)
-    if not path:
+    p = shutil.which(tool)
+    if not p:
         print("  ✗  '" + tool + "' not found in PATH — cannot continue.")
         sys.exit(1)
-    print("  ✓  " + tool + " → " + path)
+    print("  ✓  " + tool + " → " + p)
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing core pip packages")
-run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])  
-pip_install("setuptools", "wheel")
-pip_install("psycopg2-binary")   # self-contained Postgres server (no system PG needed)
+run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])\npip_install("setuptools", "wheel")
+pip_install("psycopg2-binary", "pgserver")
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
 print("  ✓  psycopg2 + pgserver imported")
 
-# ── 3. Start embedded PostgreSQL via pgserver ─────────────────────────────────
+# ── 3. Start embedded PostgreSQL ─────────────────────────────────────────────
 step("3 / 5 · Starting embedded PostgreSQL (pgserver)")
-
 os.makedirs(PG_DATA_DIR, exist_ok=True)
 pg = pgserver.get_server(PG_DATA_DIR, cleanup_mode="stop")
-print("  ✓  Postgres running — URI: " + pg.get_uri())
+print("  ✓  Postgres running")
 
-# Detect the real host/port BEFORE writing odoo.conf or connecting
-pg_host, pg_port = get_pg_host_port(pg)
-print("  ✓  Using DB  host=" + pg_host + "  port=" + str(pg_port))
+pg_host, pg_port = parse_pgserver_connection(pg)
 
 def pg_exec(sql):
     try:
@@ -214,52 +185,48 @@ pg_exec("CREATE DATABASE " + DB_NAME + " OWNER " + DB_USER + ";")
 # ── 4. Clone Odoo & install Python deps ──────────────────────────────────────
 step("4 / 5 · Cloning Odoo & installing Python requirements")
 if not os.path.exists(ODOO_DIR):
-    run([
-        "git", "clone", "--depth", "1",
-        "--branch", ODOO_BRANCH,
-        "https://github.com/odoo/odoo.git",
-        ODOO_DIR,
-    ])
+    run(["git", "clone", "--depth", "1", "--branch", ODOO_BRANCH,
+         "https://github.com/odoo/odoo.git", ODOO_DIR])
 else:
     print("  Odoo already at " + ODOO_DIR + " — skipping clone.")
 
 req_file    = os.path.join(ODOO_DIR, "requirements.txt")
 patched_req = os.path.join(tempfile.gettempdir(), "odoo_requirements_patched.txt")
-
 patch_requirements(req_file, patched_req)
-
 run([sys.executable, "-m", "pip", "install", "--quiet",
-     "--no-warn-script-location",
-     "-r", patched_req])
+     "--no-warn-script-location", "-r", patched_req])
 
-# Force-reinstall setuptools AFTER Odoo requirements so pkg_resources is never lost
 pip_install("setuptools", "wheel", extra_args=["--force-reinstall"])
 print("  ✓  setuptools force-reinstalled")
 
-# Comment out ALL pkg_resources imports AND all references to
-# PkgResourcesDeprecationWarning across the entire Odoo source tree.
 print("\n  Scanning Odoo source for pkg_resources references...")
 patch_pkg_resources(ODOO_DIR)
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
-step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
+step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT) + "")
+
+if pg_port is None:
+    # Unix socket: Odoo uses db_host = /path/to/socket/dir  (no db_port needed)
+    db_conn_lines = "db_host      = " + pg_host + "\n"
+    print("  socket mode → db_host=" + pg_host)
+else:
+    db_conn_lines = "db_host      = " + pg_host + "\ndb_port      = " + str(pg_port) + "\n"
+    print("  tcp mode    → db_host=" + pg_host + "  db_port=" + str(pg_port))
 
 conf_content = (
     "[options]\n"
     "admin_passwd = admin\n"
-    "db_host      = " + pg_host + "\n"
-    "db_port      = " + str(pg_port) + "\n"
-    "db_user      = " + DB_USER + "\n"
-    "db_password  = " + DB_PASSWORD + "\n"
-    "db_name      = " + DB_NAME + "\n"
-    "addons_path  = " + ODOO_DIR + "/addons\n"
-    "logfile      = False\n"
-    "xmlrpc_port  = " + str(ODOO_PORT) + "\n"
+    + db_conn_lines
+    + "db_user      = " + DB_USER + "\n"
+    + "db_password  = " + DB_PASSWORD + "\n"
+    + "db_name      = " + DB_NAME + "\n"
+    + "addons_path  = " + ODOO_DIR + "/addons\n"
+    + "logfile      = False\n"
+    + "xmlrpc_port  = " + str(ODOO_PORT) + "\n"
 )
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
 print("  Config written → " + ODOO_CONF)
-print("  db_host=" + pg_host + "  db_port=" + str(pg_port))
 print("\n  🌐  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
