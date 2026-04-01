@@ -141,6 +141,23 @@ def parse_pgserver_connection(pg):
 
     raise RuntimeError("Cannot determine pgserver connection from URI: " + raw_uri)
 
+def is_db_initialized(psycopg2, pg):
+    """Return True if the Odoo DB already has the ir_module_module table (base installed)."""
+    try:
+        conn = psycopg2.connect(pg.get_uri(DB_NAME))
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT EXISTS (SELECT FROM information_schema.tables "+
+            "WHERE table_name = 'ir_module_module');"
+        )
+        result = cur.fetchone()[0]
+        conn.close()
+        return result
+    except Exception as e:
+        print("  DB check notice: " + str(e))
+        return False
+
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
 for tool in ("git", "python3"):
@@ -225,6 +242,16 @@ conf_content = (
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
 print("  Config written -> " + ODOO_CONF)
+
+# Check if DB needs initializing
+db_initialized = is_db_initialized(psycopg2, pg)
+if db_initialized:
+    print("  ✓  Database already initialized — starting normally")
+    extra_args = []
+else:
+    print("  ⚠  Database not initialized — running with -i base (first run)")
+    extra_args = ["-i", "base"]
+
 print("\n  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
@@ -233,4 +260,5 @@ os.execv(sys.executable, [
     sys.executable, odoo_bin,
     "--config", ODOO_CONF,
     "--http-port", str(ODOO_PORT),
+    *extra_args,
 ])
