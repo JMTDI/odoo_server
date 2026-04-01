@@ -133,20 +133,40 @@ def patch_pkg_resources(odoo_dir):
 
 def get_pg_host_port(pg):
     """
-    Reliably extract host and port from the pgserver instance.
-    Tries pg_port / pg_host attributes first, then parses get_uri().
+    Reliably extract host and port from the pgserver instance by parsing the
+    superuser URI (pg.get_uri("postgres")).  The plain get_uri() may omit the
+    port when it equals 5432 and the server is actually on a different port;
+    the "postgres" URI always includes the real port.
+    Falls back to attribute inspection then hard defaults.
     """
-    host = getattr(pg, "pg_host", None) or "127.0.0.1"
-    port = getattr(pg, "pg_port", None)
-    if port is None:
-        try:
-            parsed = urlparse(pg.get_uri())
-            host = parsed.hostname or host
-            port = parsed.port or 5432
-        except Exception:
-            port = 5432
-    print("  ✓  pgserver host=" + str(host) + "  port=" + str(port))
-    return str(host), int(port)
+    # 1. Try parsing the superuser URI — most reliable
+    try:
+        raw_uri = pg.get_uri("postgres")
+        print("  pgserver superuser URI: " + raw_uri)
+        parsed = urlparse(raw_uri)
+        if parsed.hostname and parsed.port:
+            return str(parsed.hostname), int(parsed.port)
+    except Exception as e:
+        print("  URI parse warning: " + str(e))
+
+    # 2. Fall back to object attributes
+    host = getattr(pg, "pg_host", None) or getattr(pg, "host", None) or "127.0.0.1"
+    port = getattr(pg, "pg_port", None) or getattr(pg, "port", None)
+    if port:
+        print("  pgserver attrs  host=" + str(host) + "  port=" + str(port))
+        return str(host), int(port)
+
+    # 3. Last resort: parse the no-arg URI
+    try:
+        raw_uri = pg.get_uri()
+        parsed = urlparse(raw_uri)
+        if parsed.hostname and parsed.port:
+            return str(parsed.hostname), int(parsed.port)
+    except Exception:
+        pass
+
+    print("  WARNING: could not detect pgserver port, defaulting to 5432")
+    return "127.0.0.1", 5432
 
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
@@ -159,7 +179,7 @@ for tool in ("git", "python3"):
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing core pip packages")
-run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
+run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])  
 pip_install("setuptools", "wheel")
 pip_install("psycopg2-binary")   # self-contained Postgres server (no system PG needed)
 
@@ -174,7 +194,9 @@ os.makedirs(PG_DATA_DIR, exist_ok=True)
 pg = pgserver.get_server(PG_DATA_DIR, cleanup_mode="stop")
 print("  ✓  Postgres running — URI: " + pg.get_uri())
 
+# Detect the real host/port BEFORE writing odoo.conf or connecting
 pg_host, pg_port = get_pg_host_port(pg)
+print("  ✓  Using DB  host=" + pg_host + "  port=" + str(pg_port))
 
 def pg_exec(sql):
     try:
