@@ -38,7 +38,8 @@ PATCH_DEPS = {
 
 def run(cmd, check=True):
     display = " ".join(str(c) for c in cmd)
-    print(f"\n▶  {display}")
+    print(f"
+▶  {display}")
     subprocess.run(cmd, check=check)
 
 def step(msg):
@@ -104,9 +105,9 @@ for tool in ("git", "python3"):
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing psycopg2-binary and pgserver")
 pip_install("pip", extra_args=["--upgrade"])
-pip_install("setuptools")          # provides pkg_resources (required by Odoo)
+pip_install("setuptools", "wheel")   # provides pkg_resources (required by Odoo)
 pip_install("psycopg2-binary")
-pip_install("pgserver")            # self-contained Postgres server (no system PG needed)
+pip_install("pgserver")              # self-contained Postgres server (no system PG needed)
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
@@ -151,13 +152,15 @@ else:
 req_file    = os.path.join(ODOO_DIR, "requirements.txt")
 patched_req = os.path.join(tempfile.gettempdir(), "odoo_requirements_patched.txt")
 
-pip_install("wheel")
-pip_install("setuptools")          # ensure pkg_resources is present after venv pip upgrades
 patch_requirements(req_file, patched_req)
 
 run([sys.executable, "-m", "pip", "install", "--quiet",
      "--no-warn-script-location",
      "-r", patched_req])
+
+# Reinstall setuptools AFTER all requirements, so pkg_resources is never clobbered
+pip_install("setuptools", "wheel")
+print("  ✓  setuptools re-pinned (pkg_resources guaranteed)")
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
 step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
