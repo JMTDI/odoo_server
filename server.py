@@ -92,6 +92,30 @@ def patch_requirements(src_path, dst_path):
             if not replaced:
                 f_out.write(raw_line)
 
+def patch_netsvc(odoo_dir):
+    """
+    Remove the 'from pkg_resources import PkgResourcesDeprecationWarning' line
+    from netsvc.py and any warnings.filterwarnings line that references it.
+    This import is only used for an optional deprecation warning filter and is
+    safe to drop — it causes ModuleNotFoundError when setuptools is absent.
+    """
+    netsvc_path = os.path.join(odoo_dir, "odoo", "netsvc.py")
+    if not os.path.exists(netsvc_path):
+        print("  netsvc.py not found — skipping patch")
+        return
+    with open(netsvc_path) as f:
+        lines = f.readlines()
+    new_lines = []
+    for line in lines:
+        if "pkg_resources" in line or "PkgResourcesDeprecationWarning" in line:
+            new_lines.append("# patched out (pkg_resources unavailable): " + line)
+            print("  Patched out: " + line.rstrip())
+        else:
+            new_lines.append(line)
+    with open(netsvc_path, "w") as f:
+        f.writelines(new_lines)
+    print("  ✓  netsvc.py patched")
+
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
 for tool in ("git", "python3"):
@@ -107,7 +131,8 @@ step("2 / 5 · Installing core pip packages")
 run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
 # setuptools MUST be installed before anything else so pkg_resources is available
 pip_install("setuptools", "wheel")
-pip_install("psycopg2-binary")   # self-contained Postgres server (no system PG needed)
+pip_install("psycopg2-binary")
+pip_install("pgserver")   # self-contained Postgres server (no system PG needed)
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
@@ -158,10 +183,14 @@ run([sys.executable, "-m", "pip", "install", "--quiet",
      "--no-warn-script-location",
      "-r", patched_req])
 
-# Re-install setuptools AFTER Odoo requirements so pkg_resources is never lost
-# (some Odoo deps can downgrade / remove setuptools)
-pip_install("setuptools", "wheel")
-print("  ✓  setuptools re-pinned after requirements install")
+# Force-reinstall setuptools AFTER Odoo requirements so pkg_resources is never lost
+# (some Odoo deps can downgrade / remove setuptools on Python 3.12+)
+pip_install("setuptools", "wheel", extra_args=["--force-reinstall"])
+print("  ✓  setuptools force-reinstalled after requirements install")
+
+# Patch netsvc.py to remove the pkg_resources import (only used for an optional
+# deprecation warning filter — entirely safe to comment out)
+patch_netsvc(ODOO_DIR)
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
 step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
