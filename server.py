@@ -36,13 +36,11 @@ PATCH_DEPS = {
 
 def run(cmd, check=True):
     display = " ".join(str(c) for c in cmd)
-    print("
-▶  " + display)
+    print("\n▶  " + display)
     subprocess.run(cmd, check=check)
 
 def step(msg):
-    print("
-" + "═" * 60)
+    print("\n" + "═" * 60)
     print("  " + msg)
     print("═" * 60)
 
@@ -154,7 +152,8 @@ for tool in ("git", "python3"):
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing core pip packages")
-run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])\npip_install("setuptools", "wheel")
+run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
+pip_install("setuptools", "wheel")
 pip_install("psycopg2-binary", "pgserver")
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
@@ -203,15 +202,14 @@ print("\n  Scanning Odoo source for pkg_resources references...")
 patch_pkg_resources(ODOO_DIR)
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
-step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT) + "")
+step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT) + "\n")
 
 if pg_port is None:
-    # Unix socket: Odoo uses db_host = /path/to/socket/dir  (no db_port needed)
     db_conn_lines = "db_host      = " + pg_host + "\n"
-    print("  socket mode → db_host=" + pg_host)
+    print("  socket mode -> db_host=" + pg_host)
 else:
     db_conn_lines = "db_host      = " + pg_host + "\ndb_port      = " + str(pg_port) + "\n"
-    print("  tcp mode    → db_host=" + pg_host + "  db_port=" + str(pg_port))
+    print("  tcp mode    -> db_host=" + pg_host + "  db_port=" + str(pg_port))
 
 conf_content = (
     "[options]\n"
@@ -226,8 +224,8 @@ conf_content = (
 )
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
-print("  Config written → " + ODOO_CONF)
-print("\n  🌐  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
+print("  Config written -> " + ODOO_CONF)
+print("\n  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
 os.chdir(ODOO_DIR)
