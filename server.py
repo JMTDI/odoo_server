@@ -33,7 +33,7 @@ PG_DATA_DIR = os.path.join(os.path.expanduser("~"), "pgdata")
 PATCH_DEPS = {
     r"^python-ldap\b":  "ldap3",
     r"^psycopg2\b(?!-binary)": "psycopg2-binary",
-    r"^libsass\b":      None,   # None → drop the line
+    r"^libsass\b":      None,   # None -> drop the line
 }
 
 def run(cmd, check=True):
@@ -102,11 +102,12 @@ for tool in ("git", "python3"):
     print("  ✓  " + tool + " → " + path)
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
-step("2 / 5 · Installing psycopg2-binary and pgserver")
-pip_install("pip", extra_args=["--upgrade"])
-pip_install("setuptools", "wheel")   # provides pkg_resources (required by Odoo)
-pip_install("psycopg2-binary")
-pip_install("pgserver")              # self-contained Postgres server (no system PG needed)
+step("2 / 5 · Installing core pip packages")
+# Upgrade pip itself first
+run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
+# setuptools MUST be installed before anything else so pkg_resources is available
+pip_install("setuptools", "wheel")
+pip_install("psycopg2-binary")   # self-contained Postgres server (no system PG needed)
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
@@ -157,9 +158,10 @@ run([sys.executable, "-m", "pip", "install", "--quiet",
      "--no-warn-script-location",
      "-r", patched_req])
 
-# Reinstall setuptools AFTER all requirements, so pkg_resources is never clobbered
+# Re-install setuptools AFTER Odoo requirements so pkg_resources is never lost
+# (some Odoo deps can downgrade / remove setuptools)
 pip_install("setuptools", "wheel")
-print("  ✓  setuptools re-pinned (pkg_resources guaranteed)")
+print("  ✓  setuptools re-pinned after requirements install")
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
 step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
