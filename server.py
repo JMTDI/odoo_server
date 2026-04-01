@@ -9,7 +9,6 @@ Odoo Auto-Installer & Host Script
 import os
 import subprocess
 import sys
-import time
 import shutil
 import importlib
 import importlib.util
@@ -92,29 +91,46 @@ def patch_requirements(src_path, dst_path):
             if not replaced:
                 f_out.write(raw_line)
 
-def patch_netsvc(odoo_dir):
+def patch_pkg_resources(odoo_dir):
     """
-    Remove the 'from pkg_resources import PkgResourcesDeprecationWarning' line
-    from netsvc.py and any warnings.filterwarnings line that references it.
-    This import is only used for an optional deprecation warning filter and is
-    safe to drop — it causes ModuleNotFoundError when setuptools is absent.
+    Walk every .py file under odoo_dir and comment out any line that does:
+      import pkg_resources
+      from pkg_resources import ...
+    These are all optional (deprecation warnings / metadata queries) and safe
+    to remove.  This is the only reliable fix when setuptools is stripped by
+    the host environment after pip install.
     """
-    netsvc_path = os.path.join(odoo_dir, "odoo", "netsvc.py")
-    if not os.path.exists(netsvc_path):
-        print("  netsvc.py not found — skipping patch")
-        return
-    with open(netsvc_path) as f:
-        lines = f.readlines()
-    new_lines = []
-    for line in lines:
-        if "pkg_resources" in line or "PkgResourcesDeprecationWarning" in line:
-            new_lines.append("# patched out (pkg_resources unavailable): " + line)
-            print("  Patched out: " + line.rstrip())
-        else:
-            new_lines.append(line)
-    with open(netsvc_path, "w") as f:
-        f.writelines(new_lines)
-    print("  ✓  netsvc.py patched")
+    import_re = re.compile(
+        r"^(\s*)(import pkg_resources|from pkg_resources import)\b"
+    )
+    patched = []
+    for root, dirs, files in os.walk(odoo_dir):
+        # skip hidden dirs and __pycache__
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            new_lines = []
+            changed = False
+            for line in lines:
+                if import_re.match(line):
+                    new_lines.append("# patched-out (pkg_resources): " + line)
+                    changed = True
+                else:
+                    new_lines.append(line)
+            if changed:
+                with open(fpath, "w", encoding="utf-8") as fh:
+                    fh.writelines(new_lines)
+                rel = os.path.relpath(fpath, odoo_dir)
+                patched.append(rel)
+                print("  patched: " + rel)
+    print("  ✓  pkg_resources imports commented out in " + str(len(patched)) + " file(s)")
 
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
@@ -127,9 +143,7 @@ for tool in ("git", "python3"):
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing core pip packages")
-# Upgrade pip itself first
 run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
-# setuptools MUST be installed before anything else so pkg_resources is available
 pip_install("setuptools", "wheel")
 pip_install("psycopg2-binary")
 pip_install("pgserver")   # self-contained Postgres server (no system PG needed)
@@ -158,7 +172,6 @@ def pg_exec(sql):
 pg_exec("CREATE ROLE " + DB_USER + " LOGIN CREATEDB PASSWORD '" + DB_PASSWORD + "';")
 pg_exec("CREATE DATABASE " + DB_NAME + " OWNER " + DB_USER + ";")
 
-# Grab port from the running pgserver instance for odoo.conf
 pg_host = "127.0.0.1"
 pg_port = getattr(pg, "pg_port", 5432)
 
@@ -184,13 +197,13 @@ run([sys.executable, "-m", "pip", "install", "--quiet",
      "-r", patched_req])
 
 # Force-reinstall setuptools AFTER Odoo requirements so pkg_resources is never lost
-# (some Odoo deps can downgrade / remove setuptools on Python 3.12+)
 pip_install("setuptools", "wheel", extra_args=["--force-reinstall"])
-print("  ✓  setuptools force-reinstalled after requirements install")
+print("  ✓  setuptools force-reinstalled")
 
-# Patch netsvc.py to remove the pkg_resources import (only used for an optional
-# deprecation warning filter — entirely safe to comment out)
-patch_netsvc(ODOO_DIR)
+# Belt-and-suspenders: comment out ALL pkg_resources imports across the Odoo tree
+# so that even if setuptools gets stripped again at runtime, Odoo won't crash.
+print("\n  Scanning Odoo source for pkg_resources imports...")
+patch_pkg_resources(ODOO_DIR)
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
 step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
