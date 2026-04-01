@@ -15,6 +15,7 @@ import importlib.util
 import site
 import re
 import tempfile
+from urllib.parse import urlparse
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ODOO_BRANCH = "17.0"
@@ -95,16 +96,11 @@ def patch_pkg_resources(odoo_dir):
     """
     Walk every .py file under odoo_dir and comment out:
       - any 'import pkg_resources' or 'from pkg_resources import ...' line
-      - any line that references 'PkgResourcesDeprecationWarning' (which would
-        cause a NameError after its import line is removed)
-    All of these are optional (deprecation warning filters / metadata queries).
+      - any line that references 'PkgResourcesDeprecationWarning'
     """
-    # Matches the import lines themselves
     import_re = re.compile(
         r"^\s*(import pkg_resources|from pkg_resources\b)"
     )
-    # Matches any line that uses the name PkgResourcesDeprecationWarning
-    # (e.g. warnings.filterwarnings calls that reference it)
     usage_re = re.compile(r"\bPkgResourcesDeprecationWarning\b")
 
     patched = []
@@ -135,6 +131,23 @@ def patch_pkg_resources(odoo_dir):
                 print("  patched: " + rel)
     print("  ✓  pkg_resources patched in " + str(len(patched)) + " file(s)")
 
+def get_pg_host_port(pg):
+    """
+    Reliably extract host and port from the pgserver instance.
+    Tries pg_port / pg_host attributes first, then parses get_uri().
+    """
+    host = getattr(pg, "pg_host", None) or "127.0.0.1"
+    port = getattr(pg, "pg_port", None)
+    if port is None:
+        try:
+            parsed = urlparse(pg.get_uri())
+            host = parsed.hostname or host
+            port = parsed.port or 5432
+        except Exception:
+            port = 5432
+    print("  ✓  pgserver host=" + str(host) + "  port=" + str(port))
+    return str(host), int(port)
+
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
 for tool in ("git", "python3"):
@@ -146,7 +159,7 @@ for tool in ("git", "python3"):
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing core pip packages")
-run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"]) 
+run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
 pip_install("setuptools", "wheel")
 pip_install("psycopg2-binary")   # self-contained Postgres server (no system PG needed)
 
@@ -161,6 +174,8 @@ os.makedirs(PG_DATA_DIR, exist_ok=True)
 pg = pgserver.get_server(PG_DATA_DIR, cleanup_mode="stop")
 print("  ✓  Postgres running — URI: " + pg.get_uri())
 
+pg_host, pg_port = get_pg_host_port(pg)
+
 def pg_exec(sql):
     try:
         conn = psycopg2.connect(pg.get_uri("postgres"))
@@ -173,9 +188,6 @@ def pg_exec(sql):
 
 pg_exec("CREATE ROLE " + DB_USER + " LOGIN CREATEDB PASSWORD '" + DB_PASSWORD + "';")
 pg_exec("CREATE DATABASE " + DB_NAME + " OWNER " + DB_USER + ";")
-
-pg_host = "127.0.0.1"
-pg_port = getattr(pg, "pg_port", 5432)
 
 # ── 4. Clone Odoo & install Python deps ──────────────────────────────────────
 step("4 / 5 · Cloning Odoo & installing Python requirements")
@@ -225,6 +237,7 @@ conf_content = (
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
 print("  Config written → " + ODOO_CONF)
+print("  db_host=" + pg_host + "  db_port=" + str(pg_port))
 print("\n  🌐  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
