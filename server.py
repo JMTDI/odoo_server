@@ -31,11 +31,8 @@ PG_DATA_DIR = os.path.join(os.path.expanduser("~"), "pgdata")
 # Packages that need C compilation / system libs, mapped to pip-installable
 # pure-Python (or pre-built-wheel) alternatives that Odoo 17 accepts.
 PATCH_DEPS = {
-    # source pkg pattern  →  replacement line written to patched requirements
     r"^python-ldap\b":  "ldap3",
     r"^psycopg2\b(?!-binary)": "psycopg2-binary",
-    # gevent has wheels on PyPI for common platforms; keep as-is but don't fail
-    # libsass / pySasl have no pure alternatives — skip them (Odoo runs without)
     r"^libsass\b":      None,   # None → drop the line
 }
 
@@ -107,8 +104,9 @@ for tool in ("git", "python3"):
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing psycopg2-binary and pgserver")
 pip_install("pip", extra_args=["--upgrade"])
+pip_install("setuptools")          # provides pkg_resources (required by Odoo)
 pip_install("psycopg2-binary")
-pip_install("pgserver")   # self-contained Postgres server (no system PG needed)
+pip_install("pgserver")            # self-contained Postgres server (no system PG needed)
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
@@ -154,6 +152,7 @@ req_file    = os.path.join(ODOO_DIR, "requirements.txt")
 patched_req = os.path.join(tempfile.gettempdir(), "odoo_requirements_patched.txt")
 
 pip_install("wheel")
+pip_install("setuptools")          # ensure pkg_resources is present after venv pip upgrades
 patch_requirements(req_file, patched_req)
 
 run([sys.executable, "-m", "pip", "install", "--quiet",
