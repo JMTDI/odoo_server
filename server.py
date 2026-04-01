@@ -93,19 +93,22 @@ def patch_requirements(src_path, dst_path):
 
 def patch_pkg_resources(odoo_dir):
     """
-    Walk every .py file under odoo_dir and comment out any line that does:
-      import pkg_resources
-      from pkg_resources import ...
-    These are all optional (deprecation warnings / metadata queries) and safe
-    to remove.  This is the only reliable fix when setuptools is stripped by
-    the host environment after pip install.
+    Walk every .py file under odoo_dir and comment out:
+      - any 'import pkg_resources' or 'from pkg_resources import ...' line
+      - any line that references 'PkgResourcesDeprecationWarning' (which would
+        cause a NameError after its import line is removed)
+    All of these are optional (deprecation warning filters / metadata queries).
     """
+    # Matches the import lines themselves
     import_re = re.compile(
-        r"^(\s*)(import pkg_resources|from pkg_resources import)\b"
+        r"^\s*(import pkg_resources|from pkg_resources\b)"
     )
+    # Matches any line that uses the name PkgResourcesDeprecationWarning
+    # (e.g. warnings.filterwarnings calls that reference it)
+    usage_re = re.compile(r"\bPkgResourcesDeprecationWarning\b")
+
     patched = []
     for root, dirs, files in os.walk(odoo_dir):
-        # skip hidden dirs and __pycache__
         dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
         for fname in files:
             if not fname.endswith(".py"):
@@ -119,7 +122,7 @@ def patch_pkg_resources(odoo_dir):
             new_lines = []
             changed = False
             for line in lines:
-                if import_re.match(line):
+                if import_re.match(line) or usage_re.search(line):
                     new_lines.append("# patched-out (pkg_resources): " + line)
                     changed = True
                 else:
@@ -130,7 +133,7 @@ def patch_pkg_resources(odoo_dir):
                 rel = os.path.relpath(fpath, odoo_dir)
                 patched.append(rel)
                 print("  patched: " + rel)
-    print("  ✓  pkg_resources imports commented out in " + str(len(patched)) + " file(s)")
+    print("  ✓  pkg_resources patched in " + str(len(patched)) + " file(s)")
 
 # ── 1. Check prerequisites ────────────────────────────────────────────────────
 step("1 / 5 · Checking prerequisites")
@@ -143,10 +146,9 @@ for tool in ("git", "python3"):
 
 # ── 2. Install pip packages ───────────────────────────────────────────────────
 step("2 / 5 · Installing core pip packages")
-run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
+run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"]) 
 pip_install("setuptools", "wheel")
-pip_install("psycopg2-binary")
-pip_install("pgserver")   # self-contained Postgres server (no system PG needed)
+pip_install("psycopg2-binary")   # self-contained Postgres server (no system PG needed)
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
@@ -200,9 +202,9 @@ run([sys.executable, "-m", "pip", "install", "--quiet",
 pip_install("setuptools", "wheel", extra_args=["--force-reinstall"])
 print("  ✓  setuptools force-reinstalled")
 
-# Belt-and-suspenders: comment out ALL pkg_resources imports across the Odoo tree
-# so that even if setuptools gets stripped again at runtime, Odoo won't crash.
-print("\n  Scanning Odoo source for pkg_resources imports...")
+# Comment out ALL pkg_resources imports AND all references to
+# PkgResourcesDeprecationWarning across the entire Odoo source tree.
+print("\n  Scanning Odoo source for pkg_resources references...")
 patch_pkg_resources(ODOO_DIR)
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
