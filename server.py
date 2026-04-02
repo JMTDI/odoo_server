@@ -28,10 +28,12 @@ DB_NAME     = "odoo"
 PG_DATA_DIR = os.path.join(os.path.expanduser("~"), "pgdata")
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Packages that need C compilation / system libs, mapped to pip-installable
+# pure-Python (or pre-built-wheel) alternatives that Odoo 17 accepts.
+# libsass has pre-built wheels for Linux/macOS/Windows — do NOT drop it.
 PATCH_DEPS = {
-    r"^python-ldap\b":  "ldap3",
+    r"^python-ldap\b":         "ldap3",
     r"^psycopg2\b(?!-binary)": "psycopg2-binary",
-    r"^libsass\b":      None,
 }
 
 def run(cmd, check=True):
@@ -45,6 +47,7 @@ def step(msg):
     print("═" * 60)
 
 def pip_install(*packages, extra_args=None):
+    """Install packages and immediately make them importable in this process."""
     extra = extra_args or []
     run([sys.executable, "-m", "pip", "install", "--quiet", *extra, *packages])
     importlib.invalidate_caches()
@@ -63,6 +66,10 @@ def import_or_install(module_name, pip_name=None):
     return importlib.import_module(module_name)
 
 def patch_requirements(src_path, dst_path):
+    """
+    Read src_path and write dst_path with problematic C-extension packages
+    replaced by their pure-Python / pre-built-wheel equivalents.
+    """
     written_replacements = set()
     with open(src_path) as f_in, open(dst_path, "w") as f_out:
         for raw_line in f_in:
@@ -171,7 +178,7 @@ for tool in ("git", "python3"):
 step("2 / 5 · Installing core pip packages")
 run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
 pip_install("setuptools", "wheel")
-pip_install("psycopg2-binary", "pgserver")
+pip_install("psycopg2-binary", "pgserver", "libsass")
 
 psycopg2 = import_or_install("psycopg2", "psycopg2-binary")
 pgserver  = import_or_install("pgserver", "pgserver")
@@ -219,14 +226,15 @@ print("\n  Scanning Odoo source for pkg_resources references...")
 patch_pkg_resources(ODOO_DIR)
 
 # ── 5. Write config & launch Odoo ────────────────────────────────────────────
-step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT) + "\n")
+step("5 / 5 · Writing odoo.conf & launching Odoo on port " + str(ODOO_PORT))
 
 if pg_port is None:
+    # Unix socket: Odoo uses db_host = /path/to/socket/dir  (no db_port needed)
     db_conn_lines = "db_host      = " + pg_host + "\n"
-    print("  socket mode -> db_host=" + pg_host)
+    print("  socket mode → db_host=" + pg_host)
 else:
     db_conn_lines = "db_host      = " + pg_host + "\ndb_port      = " + str(pg_port) + "\n"
-    print("  tcp mode    -> db_host=" + pg_host + "  db_port=" + str(pg_port))
+    print("  tcp mode    → db_host=" + pg_host + "  db_port=" + str(pg_port))
 
 conf_content = (
     "[options]\n"
@@ -241,7 +249,8 @@ conf_content = (
 )
 with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
-print("  Config written -> " + ODOO_CONF)
+print("  Config written → " + ODOO_CONF)
+print("\n  🌐  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
 
 # Check if DB needs initializing
 db_initialized = is_db_initialized(psycopg2, pg)
@@ -251,8 +260,6 @@ if db_initialized:
 else:
     print("  ⚠  Database not initialized — running with -i base (first run)")
     extra_args = ["-i", "base"]
-
-print("\n  Odoo starting at http://0.0.0.0:" + str(ODOO_PORT) + "\n")
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
 os.chdir(ODOO_DIR)
