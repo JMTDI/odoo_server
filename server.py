@@ -27,8 +27,8 @@ import http.client
 # ── Config ────────────────────────────────────────────────────────────────────
 ODOO_BRANCH   = "17.0"
 ODOO_DIR      = os.path.join(os.path.expanduser("~"), "odoo")
-ODOO_PORT     = 8000          # public port  (proxy + file manager)
-ODOO_INTERNAL = 8001          # Odoo binds here, never exposed directly
+ODOO_PORT     = 8000
+ODOO_INTERNAL = 8001
 ODOO_CONF     = os.path.join(os.path.expanduser("~"), "odoo.conf")
 DB_USER       = "odoo"
 DB_PASSWORD   = "odoo_pass_2026"
@@ -47,7 +47,6 @@ _log_lines = []
 _log_lock  = threading.Lock()
 
 class _LogTee(io.TextIOBase):
-    """Tee stdout/stderr into _log_lines and the original stream."""
     def __init__(self, original):
         self._orig = original
     def write(self, s):
@@ -179,7 +178,6 @@ def is_db_initialized(psycopg2, pg):
         return False
 
 def update_addons_path():
-    """Rewrite addons_path in odoo.conf to include all addon subdirs of ADDONS_EXTRA."""
     if not os.path.exists(ODOO_CONF):
         return
     extra_dirs = [ADDONS_EXTRA]
@@ -204,9 +202,9 @@ def _fm_html(rel_path, entries):
         href  = "/files/" + "/".join(parts[1:i+1])
         label = "addons" if i == 0 else part
         if i == len(parts) - 1:
-            breadcrumbs += '<span style="font-weight:bold">' + label + "</span>"
+            breadcrumbs += "<span style='font-weight:bold'>" + label + "</span>"
         else:
-            breadcrumbs += '<a href="' + href + '">' + label + "</a> / "
+            breadcrumbs += "<a href='" + href + "'>" + label + "</a> / "
 
     rows = ""
     if rel_path:
@@ -227,134 +225,116 @@ def _fm_html(rel_path, entries):
             "</tr>"
         )
 
-    return """<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<title>Addon File Manager</title>
-<style>
-  body{font-family:sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}
-  h1{color:#333}
-a{color:#0366d6;text-decoration:none} a:hover{text-decoration:underline}
-table{width:100%;border-collapse:collapse;margin-top:1rem}
-th{background:#f6f8fa;text-align:left;padding:.5rem .75rem;border-bottom:2px solid #e1e4e8}
-td{padding:.4rem .75rem;border-bottom:1px solid #eaecef;word-break:break-all}
-.card{background:#f6f8fa;border:1px solid #e1e4e8;border-radius:6px;padding:1rem;margin-top:1.5rem}
-input[type=text]{padding:.4rem;border:1px solid #ccc;border-radius:4px;width:220px}
-button{padding:.4rem .9rem;background:#2ea44f;color:#fff;border:none;border-radius:4px;cursor:pointer}
-button:hover{background:#22863a}
-#drop{border:2px dashed #0366d6;border-radius:6px;padding:2rem;text-align:center;
-        color:#0366d6;margin-top:1rem;cursor:pointer;transition:background .15s}
-#drop.over{background:#e8f4fd}
-#status{margin-top:.75rem;font-weight:bold;min-height:1.4em}
-#logbox{background:#111;color:#0f0;font-family:monospace;font-size:.78rem;
-          height:260px;overflow-y:auto;padding:.6rem;border-radius:4px;white-space:pre-wrap;margin-top:.5rem}
-</style>
-</head><body>
-<h1>📦 Addon File Manager</h1>
-<p>📍 """ + breadcrumbs + """</p>
-
-<table>
-  <thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead>
-  <tbody>" + rows + "</tbody>
-</table>
-
-<div class="card">
-  <strong>New folder</strong><br><br>
-  <form method="POST" action="/files-mkdir">
-    <input type="hidden" name="path" value=""" + rel_path + "">
-    <input type="text" name="name" placeholder="folder-name" required>
-    <button type="submit">Create</button>
-  </form>
-</div>
-
-<div class="card">
-  <strong>Upload file or .zip addon (zip is auto-extracted)</strong>
-  <div id="drop">Drop files here or click to browse
-    <input type="file" id="fi" multiple style="display:none">
-  </div>
-  <div id="status"></div>
-</div>
-
-<div class="card">
-  <strong>Server log</strong>
-  <div id="logbox">Loading…</div>
-</div>
-
-<script>
-var CUR_PATH = """ + rel_path + """;
-var drop   = document.getElementById('drop');
-var fi     = document.getElementById('fi');
-var status = document.getElementById('status');
-
-drop.addEventListener('click', function(){ fi.click(); });
-drop.addEventListener('dragover', function(e){ e.preventDefault(); drop.classList.add('over'); });
-drop.addEventListener('dragleave', function(){ drop.classList.remove('over'); });
-drop.addEventListener('drop', function(e){
-  e.preventDefault(); drop.classList.remove('over');
-  uploadFiles(e.dataTransfer.files);
-});
-fi.addEventListener('change', function(){ uploadFiles(fi.files); });
-
-function uploadFiles(files) {
-  var arr = Array.from(files);
-  if (!arr.length) return;
-  var idx = 0;
-  function next() {
-    if (idx >= arr.length) {
-      status.textContent = '✓ All done — reloading…';
-      setTimeout(function(){ location.reload(); }, 900);
-      return;
-    }
-    var file = arr[idx++];
-    status.textContent = 'Uploading ' + file.name + ' (' + idx + '/' + arr.length + ')…';
-    var fd = new FormData();
-    fd.append('path', CUR_PATH);
-    fd.append('file', file, file.name);
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/files-upload');
-    xhr.onload = function() {
-      var resp;
-      try { resp = JSON.parse(xhr.responseText); } catch(e) { resp = {ok:false, error:xhr.responseText}; }
-      if (resp.ok) {
-        status.textContent = '✓ ' + file.name + ' uploaded';
-        next();
-      } else {
-        status.textContent = '✗ Error: ' + (resp.error || 'unknown');
-      }
-    };
-    xhr.onerror = function(){ status.textContent = '✗ Network error'; };
-    xhr.send(fd);
-  }
-  next();
-}
-
-// ── Live log ──────────────────────────────────────────────────────────────────
-var logbox = document.getElementById('logbox');
-function fetchLog() {
-  fetch('/files-log')
-    .then(function(r){ return r.text(); })
-    .then(function(t){
-      logbox.textContent = t;
-      logbox.scrollTop = logbox.scrollHeight;
-    })
-    .catch(function(){});
-}
-fetchLog();
-setInterval(fetchLog, 2500);
-</script>
-</body></html>"""
+    page = (
+        "<!DOCTYPE html>\n"
+        "<html><head><meta charset='utf-8'>\n"
+        "<title>Addon File Manager</title>\n"
+        "<style>\n"
+        "body{font-family:sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}\n"
+        "h1{color:#333}\n"
+        "a{color:#0366d6;text-decoration:none} a:hover{text-decoration:underline}\n"
+        "table{width:100%;border-collapse:collapse;margin-top:1rem}\n"
+        "th{background:#f6f8fa;text-align:left;padding:.5rem .75rem;border-bottom:2px solid #e1e4e8}\n"
+        "td{padding:.4rem .75rem;border-bottom:1px solid #eaecef;word-break:break-all}\n"
+        ".card{background:#f6f8fa;border:1px solid #e1e4e8;border-radius:6px;padding:1rem;margin-top:1.5rem}\n"
+        "input[type=text]{padding:.4rem;border:1px solid #ccc;border-radius:4px;width:220px}\n"
+        "button{padding:.4rem .9rem;background:#2ea44f;color:#fff;border:none;border-radius:4px;cursor:pointer}\n"
+        "button:hover{background:#22863a}\n"
+        "#drop{border:2px dashed #0366d6;border-radius:6px;padding:2rem;text-align:center;"
+        "color:#0366d6;margin-top:1rem;cursor:pointer;transition:background .15s}\n"
+        "#drop.over{background:#e8f4fd}\n"
+        "#status{margin-top:.75rem;font-weight:bold;min-height:1.4em}\n"
+        "#logbox{background:#111;color:#0f0;font-family:monospace;font-size:.78rem;"
+        "height:260px;overflow-y:auto;padding:.6rem;border-radius:4px;white-space:pre-wrap;margin-top:.5rem}\n"
+        "</style>\n"
+        "</head><body>\n"
+        "<h1>📦 Addon File Manager</h1>\n"
+        "<p>📍 " + breadcrumbs + "</p>\n"
+        "<table>\n"
+        "  <thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead>\n"
+        "  <tbody>" + rows + "</tbody>\n"
+        "</table>\n"
+        "<div class='card'>\n"
+        "  <strong>New folder</strong><br><br>\n"
+        "  <form method='POST' action='/files-mkdir'>\n"
+        "    <input type='hidden' name='path' value='" + rel_path + "'>\n"
+        "    <input type='text' name='name' placeholder='folder-name' required>\n"
+        "    <button type='submit'>Create</button>\n"
+        "  </form>\n"
+        "</div>\n"
+        "<div class='card'>\n"
+        "  <strong>Upload file or .zip addon (zip is auto-extracted)</strong>\n"
+        "  <div id='drop'>Drop files here or click to browse\n"
+        "    <input type='file' id='fi' multiple style='display:none'>\n"
+        "  </div>\n"
+        "  <div id='status'></div>\n"
+        "</div>\n"
+        "<div class='card'>\n"
+        "  <strong>Server log</strong>\n"
+        "  <div id='logbox'>Loading…</div>\n"
+        "</div>\n"
+        "<script>\n"
+        "var CUR_PATH = '" + rel_path + "';\n"
+        "var drop   = document.getElementById('drop');\n"
+        "var fi     = document.getElementById('fi');\n"
+        "var status = document.getElementById('status');\n"
+        "drop.addEventListener('click', function(){ fi.click(); });\n"
+        "drop.addEventListener('dragover', function(e){ e.preventDefault(); drop.classList.add('over'); });\n"
+        "drop.addEventListener('dragleave', function(){ drop.classList.remove('over'); });\n"
+        "drop.addEventListener('drop', function(e){\n"
+        "  e.preventDefault(); drop.classList.remove('over');\n"
+        "  uploadFiles(e.dataTransfer.files);\n"
+        "});\n"
+        "fi.addEventListener('change', function(){ uploadFiles(fi.files); });\n"
+        "function uploadFiles(files) {\n"
+        "  var arr = Array.from(files);\n"
+        "  if (!arr.length) return;\n"
+        "  var idx = 0;\n"
+        "  function next() {\n"
+        "    if (idx >= arr.length) {\n"
+        "      status.textContent = '✓ All done — reloading…';\n"
+        "      setTimeout(function(){ location.reload(); }, 900);\n"
+        "      return;\n"
+        "    }\n"
+        "    var file = arr[idx++];\n"
+        "    status.textContent = 'Uploading ' + file.name + ' (' + idx + '/' + arr.length + ')…';\n"
+        "    var fd = new FormData();\n"
+        "    fd.append('path', CUR_PATH);\n"
+        "    fd.append('file', file, file.name);\n"
+        "    var xhr = new XMLHttpRequest();\n"
+        "    xhr.open('POST', '/files-upload');\n"
+        "    xhr.onload = function() {\n"
+        "      var resp;\n"
+        "      try { resp = JSON.parse(xhr.responseText); } catch(e) { resp = {ok:false, error:xhr.responseText}; }\n"
+        "      if (resp.ok) { status.textContent = '✓ ' + file.name + ' uploaded'; next(); }\n"
+        "      else { status.textContent = '✗ Error: ' + (resp.error || 'unknown'); }\n"
+        "    };\n"
+        "    xhr.onerror = function(){ status.textContent = '✗ Network error'; };\n"
+        "    xhr.send(fd);\n"
+        "  }\n"
+        "  next();\n"
+        "}\n"
+        "var logbox = document.getElementById('logbox');\n"
+        "function fetchLog() {\n"
+        "  fetch('/files-log')\n"
+        "    .then(function(r){ return r.text(); })\n"
+        "    .then(function(t){ logbox.textContent = t; logbox.scrollTop = logbox.scrollHeight; })\n"
+        "    .catch(function(){});\n"
+        "}\n"
+        "fetchLog();\n"
+        "setInterval(fetchLog, 2500);\n"
+        "</script>\n"
+        "</body></html>\n"
+    )
+    return page
 
 # ── Multipart parser ──────────────────────────────────────────────────────────
 
 def parse_multipart(raw_bytes, boundary_bytes):
-    """
-    Parse a multipart/form-data body.
-    Returns dict: field_name -> (filename_or_None, bytes_value)
-    """
     fields = {}
     delim = b"--" + boundary_bytes
     parts = raw_bytes.split(delim)
     for part in parts:
-        # strip leading CRLF
         if part in (b"", b"--", b"--\r\n", b"\r\n"):
             continue
         if part.startswith(b"\r\n"):
@@ -362,7 +342,6 @@ def parse_multipart(raw_bytes, boundary_bytes):
         if b"\r\n\r\n" not in part:
             continue
         header_raw, _, body = part.partition(b"\r\n\r\n")
-        # strip trailing CRLF / closing --
         if body.endswith(b"\r\n"):
             body = body[:-2]
         header_str = header_raw.decode("utf-8", errors="replace")
@@ -378,7 +357,7 @@ def parse_multipart(raw_bytes, boundary_bytes):
 class ProxyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
-        pass  # silence access log
+        pass
 
     def _safe_path(self, rel):
         rel  = unquote(rel).lstrip("/")
@@ -388,19 +367,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return None
         return full
 
-    # ── GET ───────────────────────────────────────────────────────────────────
     def do_GET(self):
         parsed = urlparse(self.path)
         path   = parsed.path
 
-        # live log endpoint
         if path == "/files-log":
             with _log_lock:
                 text = "".join(_log_lines)
             self._reply(200, "text/plain; charset=utf-8", text.encode("utf-8", errors="replace"))
             return
 
-        # file download
         if path.startswith("/files-dl/"):
             rel  = path[len("/files-dl/"):]  
             full = self._safe_path(rel)
@@ -418,7 +394,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
-        # delete (via GET with confirmation in JS)
         if path == "/files-delete":
             qs   = parse_qs(parsed.query)
             rel  = qs.get("path", [""])[0]
@@ -435,7 +410,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._redirect("/files/" + parent)
             return
 
-        # file-manager browser
         if path.startswith("/files"):
             rel  = path[len("/files"):].lstrip("/")
             full = self._safe_path(rel)
@@ -453,12 +427,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 fp = os.path.join(full, name)
                 entries.append((name, os.path.isdir(fp),
                                  0 if os.path.isdir(fp) else os.path.getsize(fp)))
-            self._reply(200, "text/html; charset=utf-8", _fm_html(rel, entries).encode("utf-8"))
+            self._reply(200, "text/html; charset=utf-8",
+                        _fm_html(rel, entries).encode("utf-8"))
             return
 
         self._proxy()
 
-    # ── POST ──────────────────────────────────────────────────────────────────
     def do_POST(self):
         path = urlparse(self.path).path
 
@@ -480,7 +454,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             raw    = self.rfile.read(length)
 
-            # extract boundary
             boundary = None
             for part in ctype.split(";"):
                 part = part.strip()
@@ -544,8 +517,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_PATCH(self):   self._proxy()
     def do_HEAD(self):    self._proxy()
     def do_OPTIONS(self): self._proxy()
-
-    # ── internals ─────────────────────────────────────────────────────────────
 
     def _proxy(self):
         length  = int(self.headers.get("Content-Length", 0))
@@ -683,13 +654,11 @@ with open(ODOO_CONF, "w") as f:
     f.write(conf_content)
 print("  Config written → " + ODOO_CONF)
 
-# ── Start proxy thread ────────────────────────────────────────────────────────
 t = threading.Thread(target=start_proxy, daemon=True)
 t.start()
 print("\n  🌐  Odoo public URL  → http://0.0.0.0:" + str(ODOO_PORT))
 print("  📁  File manager     → http://0.0.0.0:" + str(ODOO_PORT) + "/files\n")
 
-# ── Check if DB needs initialising ───────────────────────────────────────────
 db_initialized = is_db_initialized(psycopg2, pg)
 if db_initialized:
     print("  ✓  Database already initialized — starting normally")
@@ -700,7 +669,6 @@ else:
 
 odoo_bin = os.path.join(ODOO_DIR, "odoo-bin")
 os.chdir(ODOO_DIR)
-# subprocess.run (not os.execv) keeps the proxy daemon thread alive
 subprocess.run([
     sys.executable, odoo_bin,
     "--config", ODOO_CONF,
